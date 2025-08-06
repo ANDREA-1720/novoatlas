@@ -5,6 +5,8 @@ import net.minecraft.util.Mth;
 import java.awt.image.BufferedImage;
 import java.awt.image.Raster;
 
+import static com.thedeathlycow.novoatlas.registry.ChunkedImageManager.getPixel;
+
 public record MapImage(
         int width,
         int height,
@@ -78,13 +80,13 @@ public record MapImage(
             double height = info.horizontalScale().interpolate(x, z, this);
             return (int) Math.round(info.verticalScale() * height + info.startingY());
         } else {
-            return this.getTruncated(x, z);
+            return this.getTruncated(x, z, "biome_map");
         }
     }
 
-    int getTruncated(double x, double z) {
+    int getTruncated(double x, double z, String type) {
         int truncatedX = Mth.floor(x);
         int truncatedZ = Mth.floor(z);
-        return this.pixels[truncatedX][truncatedZ];
+        return getPixel(truncatedX, truncatedZ, type);
     }
 }

@@ -4,11 +4,14 @@ import net.minecraft.util.Mth;
 import net.minecraft.util.StringRepresentable;
 import org.jetbrains.annotations.NotNull;
 
+import static com.thedeathlycow.novoatlas.registry.ChunkedImageManager.getPixel;
+
 public enum InterpolationStrategy implements StringRepresentable {
     NEAREST_NEIGHBOR("nearest_neighbor") {
         @Override
         public double interpolate(double x, double z, MapImage image) {
-            return image.getTruncated(x, z);
+            String imageType = image.type() == MapImage.Type.HEIGHTMAP ? "heightmap" : "biome_map";
+            return image.getTruncated(x, z, imageType);
         }
     },
     BILINEAR("bilinear") {
@@ -26,12 +29,12 @@ public enum InterpolationStrategy implements StringRepresentable {
             int nextX = Math.min(truncatedX + 1, image.width() - 1);
             int nextZ = Math.min(truncatedZ + 1, image.height() - 1);
 
-            int[][] pixels = image.pixels();
+            String imageType = image.type() == MapImage.Type.HEIGHTMAP ? "heightmap" : "biome_map";
 
-            int topLeft = pixels[truncatedX][truncatedZ];
-            int topRight = pixels[nextX][truncatedZ];
-            int bottomLeft = pixels[truncatedX][nextZ];
-            int bottomRight = pixels[nextX][nextZ];
+            int topLeft = getPixel(truncatedX, truncatedZ, imageType);
+            int topRight = getPixel(nextX, truncatedZ, imageType);
+            int bottomLeft = getPixel(truncatedX, nextZ, imageType);
+            int bottomRight = getPixel(nextX, nextZ, imageType);
 
             return Mth.lerp2(deltaX, deltaZ, topLeft, topRight, bottomLeft, bottomRight);
         }
@@ -81,17 +84,18 @@ public enum InterpolationStrategy implements StringRepresentable {
     public abstract double interpolate(double x, double z, MapImage image);
 
     private static double[][] cubicNeighborhood(int x, int z, MapImage image) {
-        int[][] pixels = image.pixels();
         int width = image.width();
         int height = image.height();
 
         double[][] G = new double[4][4];
 
+        String imageType = image.type() == MapImage.Type.HEIGHTMAP ? "heightmap" : "biome_map";
+
         for (int col = -1; col < 3; col++) {
             for (int row = -1; row < 3; row++) {
                 int px = Mth.clamp(x + col, 0, width - 1);
                 int pz = Mth.clamp(z + row, 0, height - 1);
-                G[col + 1][row + 1] = pixels[px][pz];
+                G[col + 1][row + 1] = getPixel(px, pz, imageType);
             }
         }
 
