@@ -78,7 +78,7 @@ public class ChunkedImageManager {
     }
 
     /**
-     * @param pixels 1D array for better memory efficiency
+     * @param pixels 1D array for better memory efficiency (respect to legacy 2D array)
      */
     // Wrapper class for pixel data with dimensions
     private record PixelData(int[] pixels, int width, int height) {
