@@ -1,10 +1,12 @@
 package com.thedeathlycow.novoatlas.world.gen;
 
+import com.thedeathlycow.novoatlas.registry.ChunkedImageManager;
 import net.minecraft.util.Mth;
 import net.minecraft.util.StringRepresentable;
 import org.jetbrains.annotations.NotNull;
 
 import static com.thedeathlycow.novoatlas.registry.ChunkedImageManager.getPixel;
+import static com.thedeathlycow.novoatlas.registry.ChunkedImageManager.getTypeString;
 
 public enum InterpolationStrategy implements StringRepresentable {
     NEAREST_NEIGHBOR("nearest_neighbor") {
@@ -26,10 +28,12 @@ public enum InterpolationStrategy implements StringRepresentable {
             double deltaX = x - truncatedX;
             double deltaZ = z - truncatedZ;
 
-            int nextX = Math.min(truncatedX + 1, image.width() - 1);
-            int nextZ = Math.min(truncatedZ + 1, image.height() - 1);
+            String imageType = getTypeString(image.type());
+            int width = ChunkedImageManager.width;
+            int height = ChunkedImageManager.height;
 
-            String imageType = image.type() == MapImage.Type.HEIGHTMAP ? "heightmap" : "biome_map";
+            int nextX = Math.min(truncatedX + 1, width - 1);
+            int nextZ = Math.min(truncatedZ + 1, height - 1);
 
             int topLeft = getPixel(truncatedX, truncatedZ, imageType);
             int topRight = getPixel(nextX, truncatedZ, imageType);
@@ -84,12 +88,11 @@ public enum InterpolationStrategy implements StringRepresentable {
     public abstract double interpolate(double x, double z, MapImage image);
 
     private static double[][] cubicNeighborhood(int x, int z, MapImage image) {
-        int width = image.width();
-        int height = image.height();
+        String imageType = getTypeString(image.type());
+        int width = ChunkedImageManager.width;
+        int height = ChunkedImageManager.height;
 
         double[][] G = new double[4][4];
-
-        String imageType = image.type() == MapImage.Type.HEIGHTMAP ? "heightmap" : "biome_map";
 
         for (int col = -1; col < 3; col++) {
             for (int row = -1; row < 3; row++) {

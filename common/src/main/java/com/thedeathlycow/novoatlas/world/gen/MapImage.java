@@ -1,16 +1,15 @@
 package com.thedeathlycow.novoatlas.world.gen;
 
+import com.thedeathlycow.novoatlas.registry.ChunkedImageManager;
 import net.minecraft.util.Mth;
 
 import java.awt.image.BufferedImage;
 import java.awt.image.Raster;
 
 import static com.thedeathlycow.novoatlas.registry.ChunkedImageManager.getPixel;
+import static com.thedeathlycow.novoatlas.registry.ChunkedImageManager.getTypeString;
 
 public record MapImage(
-        int width,
-        int height,
-        int[][] pixels,
         Type type
 ) {
     public enum Type {
@@ -19,12 +18,7 @@ public record MapImage(
     }
 
     public static MapImage fromBufferedImage(BufferedImage image, Type type) {
-        int width = image.getWidth();
-        int height = image.getHeight();
-
-        int[][] pixels = type == Type.BIOME_MAP ? getColorPixels(image, width, height) : getGrayScalePixels(image, width, height);
-
-        return new MapImage(width, height, pixels, type);
+        return new MapImage(type);
     }
 
     private static int[][] getGrayScalePixels(BufferedImage image, int width, int height) {
@@ -65,10 +59,14 @@ public record MapImage(
 
     public int sample(int x, int z, MapInfo info, int fallback) {
         float horizontalScale = info.horizontalScale().value();
-        double xR = (x / horizontalScale) + this.width() / 2.0; // these will always be even numbers
-        double zR = (z / horizontalScale) + this.height() / 2.0;
 
-        if (xR < 0 || zR < 0 || xR >= this.width() || zR >= this.height()) {
+        int width = ChunkedImageManager.width;
+        int height = ChunkedImageManager.height;
+
+        double xR = (x / horizontalScale) + width / 2.0; // these will always be even numbers
+        double zR = (z / horizontalScale) + height / 2.0;
+
+        if (xR < 0 || zR < 0 || xR >= width || zR >= height) {
             return fallback;
         }
 

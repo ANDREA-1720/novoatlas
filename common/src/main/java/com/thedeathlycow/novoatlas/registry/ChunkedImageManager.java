@@ -3,64 +3,117 @@ package com.thedeathlycow.novoatlas.registry;
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.thedeathlycow.novoatlas.NovoAtlas;
+import com.thedeathlycow.novoatlas.world.gen.MapImage;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.awt.image.WritableRaster;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Path;
 import java.nio.file.Files;
-import java.util.concurrent.*;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.stream.Stream;
 
 import static com.thedeathlycow.novoatlas.NovoAtlasPlatform.getConfigPath;
-
 
 public class ChunkedImageManager {
     private static final int DEFAULT_CACHE_SIZE = 100;
     private static final int CHUNK_SIZE = 512;
 
     private static final Path CONFIG_PATH = getConfigPath();
+    public static final int width;
+    public static final int height;
 
+    static{
+        try (Stream<Path> xDirsStream = Files.list(CONFIG_PATH)) {
+            List<Path> xDirs = xDirsStream
+                    .filter(Files::isDirectory)
+                    .filter(path -> {
+                        try {
+                            return path.getFileName().toString().matches("\\d+");
+                        } catch (Exception e) {
+                            return false;
+                        }
+                    })
+                    .toList();
+
+            int xCount = xDirs.size();
+
+            // Find "0" directory from xDirs
+            Optional<Path> zeroDirOpt = xDirs.stream()
+                    .filter(path -> path.getFileName().toString().equals("0"))
+                    .findFirst();
+
+            int yCount = 0;
+
+            if (zeroDirOpt.isPresent()) {
+                Path zeroDir = zeroDirOpt.get();
+
+                try (Stream<Path> yDirsStream = Files.list(zeroDir)) {
+                    List<Path> yDirs = yDirsStream
+                            .filter(Files::isDirectory)
+                            .filter(path -> {
+                                try {
+                                    return path.getFileName().toString().matches("\\d+");
+                                } catch (Exception e) {
+                                    return false;
+                                }
+                            })
+                            .toList();
+
+                    yCount = yDirs.size();
+                }
+            }
+
+            width = xCount * CHUNK_SIZE;
+            height = yCount * CHUNK_SIZE;
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     /**
      * @param pixels 1D array for better memory efficiency
-     */ // Wrapper class for pixel data with dimensions
-        private record PixelData(int[] pixels, int width, int height) {
-
+     */
+    // Wrapper class for pixel data with dimensions
+    private record PixelData(int[] pixels, int width, int height) {
         // Fast inline method for 2D to 1D index conversion
-            int getPixel(int x, int y) {
-                return pixels[y * width + x];
-            }
+        int getPixel(int x, int y) {
+            return pixels[y * width + x];
         }
+    }
 
-    // High-performance concurrent LRU cache using Caffeine
+    // High-performance concurrent LRU cache for pixel data using Caffeine
     private static final AsyncLoadingCache<String, PixelData> pixelCache;
 
     // Virtual thread executor for async operations
     private static final ExecutorService virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     static {
-        // Allow configuration of cache size via system property
-        String cacheSizeProperty = System.getProperty("novoatlas.cache.size");
-        int maxCacheSize = cacheSizeProperty != null ? Integer.parseInt(cacheSizeProperty) : DEFAULT_CACHE_SIZE;
+        // Allow configuration of pixel cache size via system property
+        String pixelCacheSizeProperty = System.getProperty("novoatlas.pixelCache.size");
+        int maxPixelCacheSize =
+                pixelCacheSizeProperty != null ? Integer.parseInt(pixelCacheSizeProperty) : DEFAULT_CACHE_SIZE;
 
         // Configure main pixel cache with async loading.
-        // We provide an AsyncCacheLoader function here, allowing us to use our virtualExecutor.
-        pixelCache = Caffeine.newBuilder()
-                .maximumSize(maxCacheSize)
-                .buildAsync((key, executor) -> CompletableFuture.supplyAsync(() -> {
-                    // The actual blocking I/O operation (ImageIO.read) is now submitted
-                    // to the executor provided by Caffeine (which will be our virtualExecutor
-                    // if we specify it below, or its default commonPool otherwise).
-                    // We'll explicitly use our virtualExecutor in the buildAsync method.
-                    return loadPixelData(key);
-                }, virtualExecutor)); // Explicitly use our virtualExecutor for loading
+        pixelCache =
+                Caffeine.newBuilder()
+                        .maximumSize(maxPixelCacheSize)
+                        .buildAsync(
+                                (key, executor) ->
+                                        CompletableFuture.supplyAsync(
+                                                () -> loadPixelData(key), virtualExecutor
+                                        )
+                        ); // Explicitly use our virtualExecutor for loading
+
     }
 
-    /**
-     * Main method to get pixel value at world coordinates
-     */
+    /** Main method to get pixel value at world coordinates */
     public static int getPixel(int x, int y, String type) {
         int imageX = x / CHUNK_SIZE;
         int imageY = y / CHUNK_SIZE;
@@ -75,8 +128,11 @@ public class ChunkedImageManager {
             int actualY = y - (imageY * CHUNK_SIZE);
 
             // Bounds checking (can be removed if coordinates are pre-validated)
-            if (actualX >= 0 && actualX < pixelData.width &&
-                    actualY >= 0 && actualY < pixelData.height) {
+            // TODO: this is probably removable
+            if (actualX >= 0
+                    && actualX < pixelData.width
+                    && actualY >= 0
+                    && actualY < pixelData.height) {
 
                 return pixelData.getPixel(actualX, actualY);
             }
@@ -84,7 +140,6 @@ public class ChunkedImageManager {
 
         return Integer.MIN_VALUE;
     }
-
 
     private static String buildImageKey(int imageX, int imageY, String type) {
         return imageX + "/" + imageY + "/" + type + ".png";
@@ -112,19 +167,16 @@ public class ChunkedImageManager {
     private static PixelData loadPixelData(String imageKey) {
         Path imagePath = CONFIG_PATH.resolve(imageKey);
 
-        NovoAtlas.LOGGER.info("Loading pixel data for: {}", imageKey);
-
         try (InputStream is = Files.newInputStream(imagePath)) {
             BufferedImage image = ImageIO.read(is); // This is the blocking call
             if (image != null) {
-                PixelData pixelData = extractPixelData1D(image, imageKey);
-                NovoAtlas.LOGGER.info("Loaded pixel data for: {}", imageKey);
-                return pixelData;
+                return extractPixelData1D(image, imageKey);
             } else {
                 NovoAtlas.LOGGER.warn("Failed to decode image {}", imagePath);
             }
         } catch (IOException e) {
             NovoAtlas.LOGGER.debug("Error reading image {}: {}", imagePath, e.getMessage());
+            // Wrap IOException in an unchecked exception for CompletableFuture to handle
             throw new RuntimeException("Failed to load image: " + imageKey, e);
         }
 
@@ -136,6 +188,7 @@ public class ChunkedImageManager {
         int height = image.getHeight();
 
         // Determine if this is a heightmap based on the key
+        // This still works because the 'type' (e.g., "heightmap") is part of the imageKey.
         boolean isHeightmap = imageKey.contains("heightmap");
 
         int[] pixelData = new int[width * height];
@@ -166,8 +219,11 @@ public class ChunkedImageManager {
             for (int i = 0; i < pixelData.length; i++) {
                 pixelData[i] = pixelData[i] & 0xffffff;
             }
-
         }
         return new PixelData(pixelData, width, height);
+    }
+
+    public static String getTypeString(MapImage.Type type){
+        return type == MapImage.Type.HEIGHTMAP ? "heightmap" : "biome_map";
     }
 }
