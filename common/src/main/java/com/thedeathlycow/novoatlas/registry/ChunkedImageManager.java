@@ -127,15 +127,7 @@ public class ChunkedImageManager {
             int actualX = x - (imageX * CHUNK_SIZE);
             int actualY = y - (imageY * CHUNK_SIZE);
 
-            // Bounds checking (can be removed if coordinates are pre-validated)
-            // TODO: this is probably removable
-            if (actualX >= 0
-                    && actualX < pixelData.width
-                    && actualY >= 0
-                    && actualY < pixelData.height) {
-
-                return pixelData.getPixel(actualX, actualY);
-            }
+            return pixelData.getPixel(actualX, actualY);
         }
 
         return Integer.MIN_VALUE;
