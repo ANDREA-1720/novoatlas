@@ -14,7 +14,6 @@ dependencies {
 
     modCompileOnly("com.github.glitchfiend:TerraBlender-fabric:$rootProject.minecraft_version-$rootProject.terrablender_version")
 
-    // Add Caffeine cache library
     implementation "com.github.ben-manes.caffeine:caffeine:3.2.2"
 }
 
