@@ -3,6 +3,8 @@ package com.thedeathlycow.novoatlas.neoforge;
 import net.neoforged.fml.loading.FMLPaths;
 import net.neoforged.fml.loading.LoadingModList;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 public class NovoAtlasPlatformImpl {
@@ -11,6 +13,12 @@ public class NovoAtlasPlatformImpl {
     }
 
     public static Path getConfigPath() {
-        return FMLPaths.CONFIGDIR.get().resolve("novoatlas");
+        Path configPath = FMLPaths.CONFIGDIR.get().resolve("novoatlas");
+        try {
+            Files.createDirectories(configPath);
+        } catch (IOException e){
+            throw new RuntimeException(e.getMessage());
+        }
+        return configPath;
     }
 }
