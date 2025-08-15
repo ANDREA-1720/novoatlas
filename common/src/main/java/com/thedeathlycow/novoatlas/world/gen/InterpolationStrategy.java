@@ -12,8 +12,7 @@ public enum InterpolationStrategy implements StringRepresentable {
     NEAREST_NEIGHBOR("nearest_neighbor") {
         @Override
         public double interpolate(double x, double z, MapImage image) {
-            String imageType = image.type() == MapImage.Type.HEIGHTMAP ? "heightmap" : "biome_map";
-            return image.getTruncated(x, z, imageType);
+            return image.getTruncated(x, z, (image.type() == MapImage.Type.HEIGHTMAP ? (byte)0 : (byte)1));
         }
     },
     BILINEAR("bilinear") {
@@ -28,17 +27,17 @@ public enum InterpolationStrategy implements StringRepresentable {
             double deltaX = x - truncatedX;
             double deltaZ = z - truncatedZ;
 
-            String imageType = getTypeString(image.type());
+            final byte typeId = (image.type() == MapImage.Type.HEIGHTMAP ? (byte)0 : (byte)1);
             int width = ChunkedImageManager.width;
             int height = ChunkedImageManager.height;
 
             int nextX = Math.min(truncatedX + 1, width - 1);
             int nextZ = Math.min(truncatedZ + 1, height - 1);
 
-            int topLeft = getPixel(truncatedX, truncatedZ, imageType);
-            int topRight = getPixel(nextX, truncatedZ, imageType);
-            int bottomLeft = getPixel(truncatedX, nextZ, imageType);
-            int bottomRight = getPixel(nextX, nextZ, imageType);
+            int topLeft = getPixel(truncatedX, truncatedZ, typeId);
+            int topRight = getPixel(nextX, truncatedZ, typeId);
+            int bottomLeft = getPixel(truncatedX, nextZ, typeId);
+            int bottomRight = getPixel(nextX, nextZ, typeId);
 
             return Mth.lerp2(deltaX, deltaZ, topLeft, topRight, bottomLeft, bottomRight);
         }
@@ -94,11 +93,12 @@ public enum InterpolationStrategy implements StringRepresentable {
 
         double[][] G = new double[4][4];
 
+        final byte typeId = (image.type() == MapImage.Type.HEIGHTMAP ? (byte)0 : (byte)1);
         for (int col = -1; col < 3; col++) {
             for (int row = -1; row < 3; row++) {
                 int px = Mth.clamp(x + col, 0, width - 1);
                 int pz = Mth.clamp(z + row, 0, height - 1);
-                G[col + 1][row + 1] = getPixel(px, pz, imageType);
+                G[col + 1][row + 1] = getPixel(px, pz, typeId);
             }
         }
 

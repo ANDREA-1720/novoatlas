@@ -1,7 +1,7 @@
 package com.thedeathlycow.novoatlas.registry;
 
-import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.thedeathlycow.novoatlas.NovoAtlas;
 import com.thedeathlycow.novoatlas.world.gen.MapImage;
 
@@ -14,208 +14,213 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.stream.Stream;
 
 import static com.thedeathlycow.novoatlas.NovoAtlasPlatform.getConfigPath;
 
-public class ChunkedImageManager {
+public final class ChunkedImageManager {
+    private ChunkedImageManager() {}
     private static final int DEFAULT_CACHE_SIZE = 100;
+
+    /** Size in pixels of each image chunk. Must remain a power of two. */
     private static final int CHUNK_SIZE = 512;
+    private static final int CHUNK_BITS = 9;            // 2^9 = 512
+    private static final int CHUNK_MASK = CHUNK_SIZE - 1;
 
     private static final Path CONFIG_PATH = getConfigPath();
+
     public static final int width;
     public static final int height;
 
-    static{
+    private static final byte TYPE_HEIGHTMAP = 0;
+    private static final byte TYPE_BIOME_MAP = 1;
+
+    // Local cache for avoiding ConcurrentHashMap overhead
+    private static final ThreadLocal<LocalCache> TL_LOCAL_CACHE =
+            ThreadLocal.withInitial(LocalCache::new);
+
+    private static final class LocalCache {
+        ImageKey lastKey;
+        PixelData lastData;
+    }
+
+    static {
+        ImageIO.setUseCache(false);
+
+        int derivedWidth;
+        int derivedHeight;
         try (Stream<Path> xDirsStream = Files.list(CONFIG_PATH)) {
             List<Path> xDirs = xDirsStream
                     .filter(Files::isDirectory)
                     .filter(path -> {
-                        try {
-                            return path.getFileName().toString().matches("\\d+");
-                        } catch (Exception e) {
-                            return false;
+                        String name = path.getFileName().toString();
+                        for (int i = 0, n = name.length(); i < n; i++) {
+                            char c = name.charAt(i);
+                            if (c < '0' || c > '9') return false;
                         }
+                        return !name.isEmpty();
                     })
                     .toList();
 
             int xCount = xDirs.size();
 
-            // Find "0" directory from xDirs
             Optional<Path> zeroDirOpt = xDirs.stream()
                     .filter(path -> path.getFileName().toString().equals("0"))
                     .findFirst();
 
             int yCount = 0;
-
             if (zeroDirOpt.isPresent()) {
                 Path zeroDir = zeroDirOpt.get();
-
                 try (Stream<Path> yDirsStream = Files.list(zeroDir)) {
                     List<Path> yDirs = yDirsStream
                             .filter(Files::isDirectory)
                             .filter(path -> {
-                                try {
-                                    return path.getFileName().toString().matches("\\d+");
-                                } catch (Exception e) {
-                                    return false;
+                                String name = path.getFileName().toString();
+                                for (int i = 0, n = name.length(); i < n; i++) {
+                                    char c = name.charAt(i);
+                                    if (c < '0' || c > '9') return false;
                                 }
+                                return !name.isEmpty();
                             })
                             .toList();
-
                     yCount = yDirs.size();
                 }
             }
 
-            width = xCount * CHUNK_SIZE;
-            height = yCount * CHUNK_SIZE;
+            derivedWidth = xCount * CHUNK_SIZE;
+            derivedHeight = yCount * CHUNK_SIZE;
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            throw new RuntimeException("Failed computing atlas dimensions under " + CONFIG_PATH, e);
         }
+        width = derivedWidth;
+        height = derivedHeight;
     }
 
     /**
-     * @param pixels 1D array for better memory efficiency (respect to legacy 2D array)
+     * Compact wrapper for pixel array and its dimensions.
+     * Pixels are stored row-major: idx = y * width + x.
      */
-    // Wrapper class for pixel data with dimensions
     private record PixelData(int[] pixels, int width, int height) {
-        // Fast inline method for 2D to 1D index conversion
         int getPixel(int x, int y) {
             return pixels[y * width + x];
         }
     }
 
-    // High-performance concurrent LRU cache for pixel data using Caffeine
-    private static final AsyncLoadingCache<String, PixelData> pixelCache;
+    /**
+     * Immutable cache key. Avoid strings in hot path.
+     */
+    private record ImageKey(int imageX, int imageY, byte type) {}
 
-    // Virtual thread executor for async operations
-    private static final ExecutorService virtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    private static final LoadingCache<ImageKey, PixelData> pixelCache;
 
     static {
-        // Allow configuration of pixel cache size via system property
         String pixelCacheSizeProperty = System.getProperty("novoatlas.pixelCache.size");
-        int maxPixelCacheSize =
-                pixelCacheSizeProperty != null ? Integer.parseInt(pixelCacheSizeProperty) : DEFAULT_CACHE_SIZE;
+        int maxPixelCacheSize = (pixelCacheSizeProperty != null)
+                ? Integer.parseInt(pixelCacheSizeProperty)
+                : DEFAULT_CACHE_SIZE;
 
-        // Configure main pixel cache with async loading.
-        pixelCache =
-                Caffeine.newBuilder()
-                        .maximumSize(maxPixelCacheSize)
-                        .buildAsync(
-                                (key, executor) ->
-                                        CompletableFuture.supplyAsync(
-                                                () -> loadPixelData(key), virtualExecutor
-                                        )
-                        ); // Explicitly use our virtualExecutor for loading
-
+        pixelCache = Caffeine.newBuilder()
+                .maximumSize(maxPixelCacheSize)
+                .build(ChunkedImageManager::loadPixelData);
     }
 
-    /** Main method to get pixel value at world coordinates */
-    public static int getPixel(int x, int y, String type) {
-        int imageX = x / CHUNK_SIZE;
-        int imageY = y / CHUNK_SIZE;
+    /**
+     * Hot-path pixel fetch.
+     * @param x world X (pixel) coordinate
+     * @param y world Y (pixel) coordinate
+     * @param typeId 0 = heightmap, 1 = biome_map
+     * @return pixel value, or Integer.MIN_VALUE on failure
+     */
+    public static int getPixel(int x, int y, byte typeId) {
+        final int imageX = x >>> CHUNK_BITS;
+        final int imageY = y >>> CHUNK_BITS;
+        final int actualX = x & CHUNK_MASK;
+        final int actualY = y & CHUNK_MASK;
 
-        String imageKey = buildImageKey(imageX, imageY, type);
+        LocalCache local = TL_LOCAL_CACHE.get();
+        ImageKey key = local.lastKey;
 
-        // Get pixel data from cache (thread-safe and efficient)
-        PixelData pixelData = getPixelDataFromCache(imageKey);
-
-        if (pixelData != null) {
-            int actualX = x - (imageX * CHUNK_SIZE);
-            int actualY = y - (imageY * CHUNK_SIZE);
-
-            return pixelData.getPixel(actualX, actualY);
+        if (key != null &&
+                key.imageX == imageX &&
+                key.imageY == imageY &&
+                key.type == typeId) {
+            return local.lastData.getPixel(actualX, actualY);
         }
 
-        return Integer.MIN_VALUE;
+        ImageKey newKey = new ImageKey(imageX, imageY, typeId);
+        PixelData pd = pixelCache.get(newKey);
+
+        local.lastKey = newKey;
+        local.lastData = pd;
+
+        assert pd != null;
+        return pd.getPixel(actualX, actualY);
     }
 
-    private static String buildImageKey(int imageX, int imageY, String type) {
-        return imageX + "/" + imageY + "/" + type + ".png";
+
+    public static String getTypeString(MapImage.Type type) {
+        return (type == MapImage.Type.HEIGHTMAP) ? "heightmap" : "biome_map";
     }
 
-    private static PixelData getPixelDataFromCache(String imageKey) {
-        try {
-            // Caffeine loading cache handles all the concurrent access and loading logic.
-            // We've configured it to use `loadPixelData` asynchronously.
-            CompletableFuture<PixelData> future = pixelCache.get(imageKey);
+    /**
+     * Cache loader. Performs blocking file I/O and decoding.
+     */
+    private static PixelData loadPixelData(ImageKey key) {
+        final String typeStr = (key.type == TYPE_HEIGHTMAP) ? "heightmap" : "biome_map";
+        // Build path with Path.resolve, avoid string "/" concatenations
+        Path imagePath = CONFIG_PATH
+                .resolve(Integer.toString(key.imageX))
+                .resolve(Integer.toString(key.imageY))
+                .resolve(typeStr + ".png");
 
-            return future.join();
-        } catch (Exception e) {
-            NovoAtlas.LOGGER.error("Error loading pixel data for: {}", imageKey, e);
+        try (InputStream is = Files.newInputStream(imagePath)) {
+            BufferedImage image = ImageIO.read(is);
+            if (image == null) {
+                NovoAtlas.LOGGER.warn("Failed to decode image: {}", imagePath);
+                return null;
+            }
+            return extractPixelData1D(image, key.type);
+        } catch (IOException e) {
+            NovoAtlas.LOGGER.debug("I/O error reading {}: {}", imagePath, e.toString());
+            return null;
+        } catch (RuntimeException e) {
+            NovoAtlas.LOGGER.debug("Unexpected error loading {}: {}", imagePath, e.toString());
             return null;
         }
     }
 
     /**
-     * Asynchronous loading method for Caffeine cache.
-     * This method performs the actual blocking file I/O and image decoding.
-     * It is designed to be called within a CompletableFuture.supplyAsync,
-     * ensuring that the blocking work is done on the designated executor.
+     * Convert BufferedImage into a packed int[] (row-major).
+     * For heightmaps: grayscale int per pixel (band 0).
+     * For color maps: 24-bit RGB (alpha stripped).
      */
-    private static PixelData loadPixelData(String imageKey) {
-        Path imagePath = CONFIG_PATH.resolve(imageKey);
+    private static PixelData extractPixelData1D(BufferedImage image, byte typeId) {
+        final int w = image.getWidth();
+        final int h = image.getHeight();
+        final int[] pixelData = new int[w * h];
 
-        try (InputStream is = Files.newInputStream(imagePath)) {
-            BufferedImage image = ImageIO.read(is); // This is the blocking call
-            if (image != null) {
-                return extractPixelData1D(image, imageKey);
-            } else {
-                NovoAtlas.LOGGER.warn("Failed to decode image {}", imagePath);
-            }
-        } catch (IOException e) {
-            NovoAtlas.LOGGER.debug("Error reading image {}: {}", imagePath, e.getMessage());
-            // Wrap IOException in an unchecked exception for CompletableFuture to handle
-            throw new RuntimeException("Failed to load image: " + imageKey, e);
-        }
-
-        return null;
-    }
-
-    private static PixelData extractPixelData1D(BufferedImage image, String imageKey) {
-        int width = image.getWidth();
-        int height = image.getHeight();
-
-        // Determine if this is a heightmap based on the key
-        // This still works because the 'type' (e.g., "heightmap") is part of the imageKey.
-        boolean isHeightmap = imageKey.contains("heightmap");
-
-        int[] pixelData = new int[width * height];
-        if (isHeightmap) {
-            // For heightmaps, extract grayscale values from raster
+        if (typeId == TYPE_HEIGHTMAP) {
             WritableRaster raster = image.getRaster();
-
-            // Use bulk data extraction if possible
             if (raster.getNumBands() == 1) {
-                // Single band - use bulk extraction
-                int[] samples = raster.getSamples(0, 0, width, height, 0, (int[]) null);
+                // Bulk fetch of single band
+                int[] samples = raster.getSamples(0, 0, w, h, 0, (int[]) null);
                 System.arraycopy(samples, 0, pixelData, 0, samples.length);
             } else {
-                // Fallback for multi-band rasters
-                for (int y = 0; y < height; y++) {
-                    for (int x = 0; x < width; x++) {
-                        pixelData[y * width + x] = raster.getSample(x, y, 0);
+                // Fallback: take band 0 (still fast, but not bulk)
+                for (int yy = 0, idx = 0; yy < h; yy++) {
+                    for (int xx = 0; xx < w; xx++, idx++) {
+                        pixelData[idx] = raster.getSample(xx, yy, 0);
                     }
                 }
             }
-
         } else {
-            // For color images, use bulk RGB extraction
-
-            image.getRGB(0, 0, width, height, pixelData, 0, width);
-
-            // Apply the RGB mask to remove alpha channel if needed
+            // Color: fetch ARGB, strip alpha to 24-bit RGB
+            image.getRGB(0, 0, w, h, pixelData, 0, w);
             for (int i = 0; i < pixelData.length; i++) {
-                pixelData[i] = pixelData[i] & 0xffffff;
+                pixelData[i] &= 0x00FF_FFFF;
             }
         }
-        return new PixelData(pixelData, width, height);
-    }
 
-    public static String getTypeString(MapImage.Type type){
-        return type == MapImage.Type.HEIGHTMAP ? "heightmap" : "biome_map";
+        return new PixelData(pixelData, w, h);
     }
 }

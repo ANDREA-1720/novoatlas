@@ -7,7 +7,6 @@ import java.awt.image.BufferedImage;
 import java.awt.image.Raster;
 
 import static com.thedeathlycow.novoatlas.registry.ChunkedImageManager.getPixel;
-import static com.thedeathlycow.novoatlas.registry.ChunkedImageManager.getTypeString;
 
 public record MapImage(
         Type type
@@ -76,13 +75,13 @@ public record MapImage(
     private int sampleDirect(double x, double z, MapInfo info) {
         if (this.type == Type.HEIGHTMAP) {
             double height = info.horizontalScale().interpolate(x, z, this);
-            return (int) Math.round(info.verticalScale() * height + info.startingY());
+            return Mth.floor(info.verticalScale() * height + info.startingY());
         } else {
-            return this.getTruncated(x, z, "biome_map");
+            return this.getTruncated(x, z, (byte) 1);
         }
     }
 
-    int getTruncated(double x, double z, String type) {
+    int getTruncated(double x, double z, Byte type) {
         int truncatedX = Mth.floor(x);
         int truncatedZ = Mth.floor(z);
         return getPixel(truncatedX, truncatedZ, type);
